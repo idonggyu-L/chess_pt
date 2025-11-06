@@ -173,3 +173,5 @@ wandb/
 train/
 eval/
 results/
+results/*.csv
+*.csv
