@@ -1,69 +1,61 @@
 import os
-import pickle
 from collections import defaultdict
 import numpy as np
 import pandas as pd
 import transformers
-import wandb
-
-import gym
-import wrappers as wrappers
-
+import torch
+from torch.utils.data import Dataset
 import absl.app
 import absl.flags
 from flax.training.early_stopping import EarlyStopping
-from flaxmodels.flaxmodels.lstm.lstm import LSTMRewardModel
 from flaxmodels.flaxmodels.gpt2.trajectory_gpt2 import TransRewardModel
 
-from JaxPref.sampler import TrajSampler
 from JaxPref.jax_utils import batch_to_jax
-import JaxPref.reward_transform as r_tf
-from JaxPref.model import FullyConnectedQFunction
 from viskit.logging import logger, setup_logger
 from JaxPref.MR import MR
-from JaxPref.replay_buffer import get_d4rl_dataset, index_batch
-from JaxPref.NMR import NMR
 from JaxPref.PrefTransformer import PrefTransformer
 from JaxPref.utils import Timer, define_flags_with_default, set_random_seed, get_user_flags, prefix_metrics, \
     WandBLogger, save_pickle
 import gym
-import copy
 from gym.spaces import *
 import chess
 import chess.svg
+from torch.utils.data import DataLoader, SubsetRandomSampler, SequentialSampler
 
 
-os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '.50'
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
+os.environ['CUDA_VISIBLE_DEVICES'] = "0"
 
 FLAGS_DEF = define_flags_with_default(
     env='chess',
     model_type='PrefTransformer',
     max_traj_length=1000,
     seed=5,
-    data_seed=5,
+    data_seed=13,
     save_model=True,
     batch_size=128,
     early_stop=True,
-    min_delta=1e-3,
+    min_delta=5e-3,
     patience=10,
-
+    obs_dim=1344,
+    act_dim= 4672,
+    data_size = 30000,
     reward_scale=1.0,
     reward_bias=0.0,
     clip_action=0.999,
-
     reward_arch='256-256',
     orthogonal_init=False,
     activations='relu',
     activation_final='none',
     training=True,
-
     n_epochs=1000,
-    eval_period=5,
-
+    eval_period=1,
     data_dir='/home/hail/PreferenceTransformer/human_label/',
-    num_query=2500,
-    query_len=50,
+    num_query=30000,
+    len_query=10,
+    query_len=10,
     skip_flag=0,
     balance=False,
     topk=10,
@@ -73,22 +65,15 @@ FLAGS_DEF = define_flags_with_default(
     feedback_uniform=False,
     enable_bootstrap=False,
 
-    comment='new_cel_2',
-
-    robosuite=False,
-    robosuite_dataset_type="ph",
-    robosuite_dataset_path='./data',
-    robosuite_max_episode_steps=500,
+    comment='group_exinter_blitz',
 
     reward=MR.get_default_config(),
     transformer=PrefTransformer.get_default_config(),
-    lstm=NMR.get_default_config(),
     logging=WandBLogger.get_default_config(),
 )
 
 WHITE = 1
 BLACK = 0
-
 
 def __deepcopy__(self, memo):
     new_instance = self.__class__.__new__(self.__class__)
@@ -99,7 +84,6 @@ def __deepcopy__(self, memo):
     new_instance.action_space = self.action_space
 
     return new_instance
-
 
 def is_repetition(self, count: int = 3) -> bool:
     """
@@ -150,9 +134,7 @@ def is_repetition(self, count: int = 3) -> bool:
 
     return False
 
-
 chess.Board.is_repetition = is_repetition
-
 
 class Chess(gym.Env):
     """AlphaGo Chess Environment"""
@@ -161,7 +143,7 @@ class Chess(gym.Env):
     def __init__(self):
         self.board = None
 
-        self.T = 8
+        self.T = 1
         self.M = 3
         self.L = 6
 
@@ -458,7 +440,7 @@ def collect(df, env, len_query):
 
     for _, group in df:
         group = group.reset_index(drop=True)
-        labels.append(group['label'].values[0])
+        labels.append(int(group['label'].values[0]))
 
         env.reset()
 
@@ -513,43 +495,134 @@ def combine(prep_batch1, prep_batch2):
     labels_1 = np.array(prep_batch1['labels'])
     labels_2 = np.array(prep_batch2['labels'])
 
-    combined_labels = np.where(labels_1 > labels_2, [1, 0],
-                               np.where(labels_1 < labels_2, [0, 1], [0.5, 0.5]))
+    # valid_idx = labels_1 != labels_2
+    # labels_1_valid = labels_1[valid_idx]
+    # labels_2_valid = labels_2[valid_idx]
+    #
+    # combined_labels = np.stack([
+    #     np.where(labels_1_valid > labels_2_valid, 1, 0),
+    #     np.where(labels_1_valid > labels_2_valid, 0, 1)
+    # ], axis=1)
 
-    batch['observations'] = prep_batch1['observations']
-    batch['next_observations'] = prep_batch1['next_observations']
-    batch['actions'] = prep_batch1['actions']
-    batch['observations_2'] = prep_batch2['observations_2']
-    batch['next_observations_2'] = prep_batch2['next_observations_2']
-    batch['actions_2'] = prep_batch2['actions_2']
+    combined_labels = np.stack([
+        np.where(labels_1 > labels_2, 1, np.where(labels_1 < labels_2, 0, 0.5)),
+        np.where(labels_1 > labels_2, 0, np.where(labels_1 < labels_2, 1, 0.5))
+    ], axis=1)
+
+
+    # batch['observations'] = prep_batch1['observations'].reshape(50,7616)
+    # batch['next_observations'] = prep_batch1['next_observations'].reshape(50,7616)
+    #batch['observations'] = prep_batch1['observations'][:, :, :,:, :12]
+    batch['observations'] = prep_batch1['observations'].squeeze(0)
+
+    #batch['observations'] = obs.reshape(50, 64, 12)
+    # batch['observations'] = prep_batch1['observations'].reshape(50,8,8,119)
+    #batch['next_observations'] = prep_batch1['next_observations'][:, :, :, :,:12]
+    batch['next_observations'] = prep_batch1['next_observations'].squeeze(0)
+
+    #batch['next_observations'] = obs_.reshape(50, 64, 12)
+    # batch['next_observations'] = prep_batch1['next_observations'].reshape(50,8,8,119)
+
+    batch['actions'] = encode_action(prep_batch1['actions'], 4672)
+    batch['actions'] = batch['actions'].reshape(10,4672)
+
+    # batch['observations_2'] = prep_batch2['observations'].reshape(50,7616)
+    # batch['next_observations_2'] = prep_batch2['next_observations'].reshape(50,7616)
+    #batch['observations_2'] = prep_batch2['observations'][:, :, :,:, :12]
+    batch['observations_2'] = prep_batch2['observations'].squeeze(0)
+
+    #batch['observations_2'] = obs2.reshape(50, 64, 12)
+    #batch['observations_2'] = prep_batch2['observations'].reshape(50,8,8,119)
+
+    #batch['next_observations_2'] = prep_batch2['next_observations'][:, :, :,:, :12]
+    batch['next_observations_2'] = prep_batch2['next_observations'].squeeze(0)
+
+    #batch['next_observations'] = obs2_.reshape(50, 64, 12)
+    # batch['next_observations_2'] = prep_batch2['next_observations'].reshape(50,8,8,119)
+
+    batch['actions_2'] = encode_action(prep_batch2['actions'], 4672)
+    batch['actions_2'] = batch['actions_2'].reshape(10, 4672)
 
     batch['timestep_1'] = prep_batch1['timestep_1']
-    batch['timestep_2'] = prep_batch2['timestep_2']
+    batch['timestep_1'] = batch['timestep_1'].squeeze(0)
+    batch['timestep_2'] = prep_batch2['timestep_1']
+    batch['timestep_2'] = batch['timestep_2'].squeeze(0)
 
     batch['labels'] = combined_labels
+    batch['labels'] = batch['labels'].squeeze(0)
     batch['script_labels'] = combined_labels
+    batch['script_labels'] = batch['script_labels'].squeeze(0)
 
     return batch
 
-def generate_sigma(num_samples=251671):
-    sigma = np.random.permutation(num_samples)
-    return sigma[:30000], sigma[30000:]
+# class ChessDataset(Dataset):
+#     def __init__(self, data_dir, env, len_query=50, batch_size=512):
+#         self.data_dir = data_dir
+#         self.env = env
+#         self.len_query = len_query
+#         self.batch_size = batch_size
+#         self.file_list = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.endswith(".csv")]
+#
+#
+#     def __getitem__(self, idx):
+#         sigma1 = self.file_list[idx]
+#         sigma2 = self.file_list[idx+1]
+#
+#         df1 = pd.read_csv(sigma1)
+#         df2 = pd.read_csv(sigma2)
+#
+#         prep_batch1 = collect(df1, self.env, self.len_query)
+#         prep_batch2 = collect(df2, self.env, self.len_query)
+#
+#         return combine(prep_batch1, prep_batch2)
 
-def data_sample_by_id(df, sampled_indices):
-    index_range = np.concatenate([np.arange(start, end + 1) for start, end in sampled_indices])
-    return df.loc[index_range]
+class ChessDataset(Dataset):
+    def __init__(self, data_dir1, data_dir2, env, len_query=10, batch_size=128):
+        self.data_dir1 = data_dir1
+        self.data_dir2 = data_dir2
+        self.env = env
+        self.len_query = len_query
+        self.batch_size = batch_size
 
-def create_dataset(idx1, idx2, classic_df, start_pt, end_pt, env, len_query):
-    sampled_idx1 = idx1[start_pt:end_pt]
-    sampled_idx2 = idx2[start_pt:end_pt]
+        self.file_list1 = sorted([os.path.join(data_dir1, f) for f in os.listdir(data_dir1) if f.endswith(".csv")])
+        self.file_list2 = sorted([os.path.join(data_dir2, f) for f in os.listdir(data_dir2) if f.endswith(".csv")])
 
-    df1 = data_sample_by_id(classic_df, sampled_idx1)
-    df2 = data_sample_by_id(classic_df, sampled_idx2)
 
-    batch1 = collect(df1, env, len_query)
-    batch2 = collect(df2, env, len_query)
 
-    return combine(batch1, batch2)
+    def __len__(self):
+        return len(self.file_list1)
+
+    def __getitem__(self, idx):
+        sigma1 = self.file_list1[idx]
+        sigma2 = self.file_list2[idx]
+
+        df1 = pd.read_csv(sigma1)
+        df2 = pd.read_csv(sigma2)
+
+        prep_batch1 = collect(df1, self.env, self.len_query)
+        prep_batch2 = collect(df2, self.env, self.len_query)
+
+        return combine(prep_batch1, prep_batch2)
+
+def get_chess_dataloader(data_dir, env, batch_size, len_query, shuffle=True):
+    dataset = ChessDataset(data_dir, env, len_query, batch_size)
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle
+    )
+
+    return dataloader
+
+def encode_action(action, num_classes=4672):
+    action = action - 1
+    one_hot_action = np.eye(num_classes)[action]
+    return one_hot_action
+
+def tensor_to_numpy(batch):
+
+    return {key: value.cpu().numpy() if isinstance(value, torch.Tensor) else value for key, value in batch.items()}
 
 def main(_):
     FLAGS = absl.flags.FLAGS
@@ -577,19 +650,19 @@ def main(_):
 
     set_random_seed(FLAGS.seed)
 
-    observation_dim = 7616
-    action_dim = 4672
+    observation_dim = FLAGS.obs_dim
+    action_dim = FLAGS.act_dim
     criteria_key = None
 
-    data_size = 10000
+    data_size = FLAGS.data_size
     interval = int(data_size / FLAGS.batch_size) + 1
     early_stop = EarlyStopping(min_delta=FLAGS.min_delta, patience=FLAGS.patience)
-
 
     total_epochs = FLAGS.n_epochs
     config = transformers.GPT2Config(
         **FLAGS.transformer
     )
+
     config.warmup_steps = int(total_epochs * 0.1 * interval)
     config.total_steps = total_epochs * interval
 
@@ -599,32 +672,35 @@ def main(_):
     reward_model = PrefTransformer(config, trans)
     train_loss = "reward/trans_loss"
 
-    file_path = '/media/hail/HDD/Chess_data/results/train_data.csv'
-    classic_df = pd.read_csv(file_path, usecols=['game_id', 'type', 'move'])
-
-    with open('/media/hail/HDD/Chess_data/results/game_indices.pkl', 'rb') as f:
-        game_indices= pickle.load(f)
-
-    eval_data_size = 2000
+    eval_data_size = 300
     eval_interval = int(eval_data_size / FLAGS.batch_size) + 1
 
     env = Chess()
+    trn_data_dir1 = "/media/hail/HDD/chess_data_/blitz/train1"
+    trn_data_dir2 = "/media/hail/HDD/chess_data_/blitz/train2"
+
+    eval_data_dir1 = "/media/hail/HDD/chess_data_/blitz/eval1"
+    eval_data_dir2 = "/media/hail/HDD/chess_data_/blitz/eval2"
+
+
+    dataset = ChessDataset(trn_data_dir1,trn_data_dir2,env, FLAGS.len_query, FLAGS.batch_size )
+    dataset_ = ChessDataset(eval_data_dir1, eval_data_dir2, env, FLAGS.len_query, FLAGS.batch_size )
 
     for epoch in range(FLAGS.n_epochs + 1):
-        sigma1, sigma2 = generate_sigma()
         metrics = defaultdict(list)
         metrics['epoch'] = epoch
         if epoch:
-            idx1 = [game_indices[i] for i in sigma1]
-            idx2 = [game_indices[i] for i in sigma2]
-
+            shuffled_idx = np.random.permutation(FLAGS.data_size-1)
             for i in range(interval):
                 start_pt = i * FLAGS.batch_size
-                end_pt = min((i + 1) * FLAGS.batch_size,10000)
+                end_pt = min((i + 1) * FLAGS.batch_size,FLAGS.data_size-1)
                 with Timer() as train_timer:
-                    # train
-                    pref_dataset = create_dataset(idx1, idx2, classic_df,start_pt,end_pt,env,50)
-                    batch = batch_to_jax(pref_dataset)
+                    batch_indices = shuffled_idx[start_pt:end_pt]
+                    sampler = SubsetRandomSampler(batch_indices)
+                    dataloader = DataLoader(dataset,batch_size=FLAGS.batch_size, sampler=sampler)
+                    for b in dataloader:
+                        pref = tensor_to_numpy(b)
+                    batch = batch_to_jax(pref)
                     for key, val in prefix_metrics(reward_model.train(batch), 'reward').items():
                         metrics[key].append(val)
             metrics['train_time'] = train_timer()
@@ -636,7 +712,14 @@ def main(_):
         if epoch % FLAGS.eval_period == 0:
             for j in range(eval_interval):
                 eval_start_pt, eval_end_pt = j * FLAGS.batch_size, min((j + 1) * FLAGS.batch_size, 2000)
-                batch_eval = batch_to_jax(index_batch(eval_dataset, range(eval_start_pt, eval_end_pt)))
+                batch_idx = range(eval_start_pt, eval_end_pt)
+                sampler = SequentialSampler(batch_idx)
+                dataloader = DataLoader(dataset_, batch_size=FLAGS.batch_size, sampler=sampler)
+                for b in dataloader:
+                    eval = tensor_to_numpy(b)
+                batch_ = batch_to_jax(eval)
+                batch_eval = batch_to_jax(batch_)
+
                 for key, val in prefix_metrics(reward_model.evaluation(batch_eval), 'reward').items():
                     metrics[key].append(val)
             if not criteria_key:

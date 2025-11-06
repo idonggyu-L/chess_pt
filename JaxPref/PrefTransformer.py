@@ -86,7 +86,7 @@ class PrefTransformer(object):
 
         trans_params = self.trans.init(
             {"params": next_rng(), "dropout": next_rng()},
-            jnp.zeros((10, 25, self.observation_dim)),
+            jnp.zeros((10, 25, 8,8,112)),
             jnp.zeros((10, 25, self.action_dim)),
             jnp.ones((10, 25), dtype=jnp.int32)
         )
@@ -133,7 +133,7 @@ class PrefTransformer(object):
             timestep_2 = batch['timestep_2']
             labels = batch['labels']
           
-            B, T, _ = batch['observations'].shape
+            B, T, _, _, _ = batch['observations'].shape
             B, T, _ = batch['actions'].shape
 
             rng, _ = jax.random.split(rng)
@@ -205,7 +205,7 @@ class PrefTransformer(object):
             timestep_2 = batch['timestep_2']
             labels = batch['labels']
           
-            B, T, _ = batch['observations'].shape
+            B, T, _,_,_ = batch['observations'].shape
             B, T, _ = batch['actions'].shape
 
             rng, _ = jax.random.split(rng)

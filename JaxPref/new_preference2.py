@@ -38,11 +38,11 @@ FLAGS_DEF = define_flags_with_default(
     save_model=True,
     batch_size=256,
     early_stop=True,
-    min_delta=5e-3,
+    min_delta=1e-2,
     patience=10,
     obs_dim=1344,
     act_dim= 4672,
-    data_size = 50000,
+    data_size = 100000,
     reward_scale=1.0,
     reward_bias=0.0,
     clip_action=0.999,
@@ -66,12 +66,17 @@ FLAGS_DEF = define_flags_with_default(
     feedback_uniform=False,
     enable_bootstrap=False,
 
-    comment='group',
+    comment='soft_blitz',
 
     reward=MR.get_default_config(),
     transformer=PrefTransformer.get_default_config(),
     logging=WandBLogger.get_default_config(),
 )
+
+def get_soft_label(r1, r2):
+    prob = 1 / (1 + 10 ** ((r2 - r1) / 400))
+    return [prob, 1 - prob]
+
 
 WHITE = 1
 BLACK = 0
@@ -441,7 +446,7 @@ def collect(df, env, len_query):
 
     for _, group in df:
         group = group.reset_index(drop=True)
-        labels.append(int(group['labels'].values[0]))
+        labels.append(int(group['white_elo'].values[0]))
 
         env.reset()
 
@@ -496,10 +501,12 @@ def combine(prep_batch1, prep_batch2):
     labels_1 = np.array(prep_batch1['labels'])
     labels_2 = np.array(prep_batch2['labels'])
 
-    combined_labels = np.stack([
-        np.where(labels_1 > labels_2, 1, np.where(labels_1 < labels_2, 0, 0.5)),
-        np.where(labels_1 > labels_2, 0, np.where(labels_1 < labels_2, 1, 0.5))
-    ], axis=1)
+    # combined_labels = np.stack([
+    #     np.where(labels_1 > labels_2, 1, np.where(labels_1 < labels_2, 0, 0.5)),
+    #     np.where(labels_1 > labels_2, 0, np.where(labels_1 < labels_2, 1, 0.5))
+    # ], axis=1)
+
+    combined_labels = np.array([get_soft_label(r1, r2) for r1, r2 in zip(labels_1, labels_2)])
 
 
     # batch['observations'] = prep_batch1['observations'].reshape(50,7616)
@@ -547,46 +554,18 @@ def combine(prep_batch1, prep_batch2):
 
     return batch
 
-# class ChessDataset(Dataset):
-#     def __init__(self, data_dir, env, len_query=50, batch_size=512):
-#         self.data_dir = data_dir
-#         self.env = env
-#         self.len_query = len_query
-#         self.batch_size = batch_size
-#         self.file_list = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.endswith(".csv")]
-#
-#
-#     def __getitem__(self, idx):
-#         sigma1 = self.file_list[idx]
-#         sigma2 = self.file_list[idx+1]
-#
-#         df1 = pd.read_csv(sigma1)
-#         df2 = pd.read_csv(sigma2)
-#
-#         prep_batch1 = collect(df1, self.env, self.len_query)
-#         prep_batch2 = collect(df2, self.env, self.len_query)
-#
-#         return combine(prep_batch1, prep_batch2)
-
 class ChessDataset(Dataset):
-    def __init__(self, data_dir1, data_dir2, env, len_query=50, batch_size=256):
-        self.data_dir1 = data_dir1
-        self.data_dir2 = data_dir2
+    def __init__(self, data_dir, env, len_query=50, batch_size=256):
+        self.data_dir = data_dir
         self.env = env
         self.len_query = len_query
         self.batch_size = batch_size
+        self.file_list = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.endswith(".csv")]
 
-        self.file_list1 = sorted([os.path.join(data_dir1, f) for f in os.listdir(data_dir1) if f.endswith(".csv")])
-        self.file_list2 = sorted([os.path.join(data_dir2, f) for f in os.listdir(data_dir2) if f.endswith(".csv")])
-
-        #assert len(self.file_list1) == len(self.file_list2), "File counts in data_dir1 and data_dir2 must match"
-
-    def __len__(self):
-        return len(self.file_list1)
 
     def __getitem__(self, idx):
-        sigma1 = self.file_list1[idx]
-        sigma2 = self.file_list2[idx]
+        sigma1 = self.file_list[idx]
+        sigma2 = self.file_list[idx+1]
 
         df1 = pd.read_csv(sigma1)
         df2 = pd.read_csv(sigma2)
@@ -595,6 +574,34 @@ class ChessDataset(Dataset):
         prep_batch2 = collect(df2, self.env, self.len_query)
 
         return combine(prep_batch1, prep_batch2)
+
+# class ChessDataset(Dataset):
+#     def __init__(self, data_dir1, data_dir2, env, len_query=50, batch_size=256):
+#         self.data_dir1 = data_dir1
+#         self.data_dir2 = data_dir2
+#         self.env = env
+#         self.len_query = len_query
+#         self.batch_size = batch_size
+#
+#         self.file_list1 = sorted([os.path.join(data_dir1, f) for f in os.listdir(data_dir1) if f.endswith(".csv")])
+#         self.file_list2 = sorted([os.path.join(data_dir2, f) for f in os.listdir(data_dir2) if f.endswith(".csv")])
+#
+#         #assert len(self.file_list1) == len(self.file_list2), "File counts in data_dir1 and data_dir2 must match"
+#
+#     def __len__(self):
+#         return len(self.file_list1)
+#
+#     def __getitem__(self, idx):
+#         sigma1 = self.file_list1[idx]
+#         sigma2 = self.file_list2[idx]
+#
+#         df1 = pd.read_csv(sigma1)
+#         df2 = pd.read_csv(sigma2)
+#
+#         prep_batch1 = collect(df1, self.env, self.len_query)
+#         prep_batch2 = collect(df2, self.env, self.len_query)
+#
+#         return combine(prep_batch1, prep_batch2)
 
 def get_chess_dataloader(data_dir, env, batch_size, len_query, shuffle=True):
     dataset = ChessDataset(data_dir, env, len_query, batch_size)
@@ -664,17 +671,20 @@ def main(_):
     reward_model = PrefTransformer(config, trans)
     train_loss = "reward/trans_loss"
 
-    eval_data_size = 20000
+    eval_data_size = 8000
     eval_interval = int(eval_data_size / FLAGS.batch_size) + 1
 
     env = Chess()
-    trn_data_dir1 = "/home/hail/chess_pt/data/train1"
-    trn_data_dir2 = "/home/hail/chess_pt/data/train3"
-    eval_data_dir1 = "/home/hail/chess_pt/data/eval1"
-    eval_data_dir2 = "/home/hail/chess_pt/data/eval3"
+    # trn_data_dir1 = "/home/hail/chess_pt/data/train1"
+    # trn_data_dir2 = "/home/hail/chess_pt/data/train3"
+    # eval_data_dir1 = "/home/hail/chess_pt/data/eval1"
+    # eval_data_dir2 = "/home/hail/chess_pt/data/eval3"
 
-    dataset = ChessDataset(trn_data_dir1,trn_data_dir2, env, FLAGS.len_query, FLAGS.batch_size )
-    dataset_ = ChessDataset(eval_data_dir1,eval_data_dir2, env, FLAGS.len_query, FLAGS.batch_size )
+    trn_data_dir = '/media/hail/HDD/chess_data/train_blitz'
+    eval_data_dir = '/media/hail/HDD/chess_data/eval_blitz'
+
+    dataset = ChessDataset(trn_data_dir, env, FLAGS.len_query, FLAGS.batch_size )
+    dataset_ = ChessDataset(eval_data_dir, env, FLAGS.len_query, FLAGS.batch_size )
 
     for epoch in range(FLAGS.n_epochs + 1):
         metrics = defaultdict(list)
@@ -708,9 +718,9 @@ def main(_):
                 for b in dataloader:
                     eval = tensor_to_numpy(b)
                 batch_ = batch_to_jax(eval)
-                batch_eval = batch_to_jax(batch_)
+                # batch_eval = batch_to_jax(batch_)
 
-                for key, val in prefix_metrics(reward_model.evaluation(batch_eval), 'reward').items():
+                for key, val in prefix_metrics(reward_model.evaluation(batch_), 'reward').items():
                     metrics[key].append(val)
             if not criteria_key:
                     criteria_key = key

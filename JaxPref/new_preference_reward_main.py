@@ -17,7 +17,7 @@ from flaxmodels.flaxmodels.gpt2.trajectory_gpt2 import TransRewardModel
 
 
 import robosuite as suite
-from robosuite.wrappers import GymWrapper
+from robosuite.wrappers.gym_wrapper import GymWrapper
 import robomimic.utils.env_utils as EnvUtils
 
 from JaxPref.sampler import TrajSampler
@@ -60,7 +60,7 @@ FLAGS_DEF = define_flags_with_default(
     n_epochs=2000,
     eval_period=5,
 
-    data_dir='/home/hail/PreferenceTransformer/human_label',
+    data_dir='/home/hail/chess_pt/human_label',
     num_query=1000,
     query_len=25,
     skip_flag=0,

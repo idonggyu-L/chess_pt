@@ -5,7 +5,6 @@ import os
 import jax.numpy as jnp
 from collections import Counter
 
-
 os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'platform'
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.5"
 
@@ -27,14 +26,6 @@ def batch_to_jax(batch):
 
 def reward_from_preference_transformer(observation, action,reward_model, len_query=50 ):
 
-    # for online learning skip this code and input observation/action data
-    # observation data shape = (game_len, 8, 8, 119)
-    # action data shape = (game_len, )
-    # And in this code, the action is converted to one-hot encoded action
-    # example of input action style  : 7472
-    # for saved data
-    # observation = observation.squeeze(axis=0)
-    # action = action.squeeze(axis=0)
     observations = []
     actions = []
     timesteps = []

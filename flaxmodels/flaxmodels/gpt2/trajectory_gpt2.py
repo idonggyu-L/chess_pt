@@ -6,6 +6,22 @@ import h5py
 from .. import utils
 from . import ops
 
+# import torch
+# import torch.nn as nn_
+# import torch.nn.functional as F
+#
+# import numpy as np
+
+
+# def encode_with_torch(states_jax):
+#     states_np = np.array(states_jax)  # JAX numpy
+#     states_torch = torch.tensor(states_np)
+#     encoder = StateEncoder(embd_dim=128)
+#     with torch.no_grad():
+#         embd_state_ = encoder(states_torch)
+#     embd_state = jnp.array(embd_state_.detach().cpu().numpy())  # torch ¡æ numpy ¡æ JAX
+#     return embd_state
+
 
 URLS = {'gpt2': 'https://www.dropbox.com/s/0wdgj0gazwt9nm7/gpt2.h5?dl=1',
         'gpt2-medium': 'https://www.dropbox.com/s/nam11kbd83wsm7d/gpt2-medium.h5?dl=1',
@@ -318,10 +334,20 @@ class TransRewardModel(nn.Module):
     ):
         batch_size, seq_length = states.shape[0], states.shape[1]
 
+        # B = states.shape[0]
+        # T = states.shape[1]
+        #
+        # H, W, C = 8,8,119
+        # embd_state = encode_with_torch(states)
+
+        encoder = StateEncoder(embd_dim=128)
+        embd_state = encoder(states)
+
         if attn_mask is None:
             attn_mask = jnp.ones((batch_size, seq_length), dtype=jnp.float32)
 
-        embd_state = nn.Dense(features=self.embd_dim)(states)
+
+        #embd_state = nn.Dense(features=self.embd_dim)(embeddings)
         embd_action = nn.Dense(features=self.embd_dim)(actions)
         embd_timestep = nn.Embed(num_embeddings=self.max_episode_steps + 1, features=self.embd_dim)(timesteps)
 
@@ -408,3 +434,58 @@ class TransRewardModel(nn.Module):
                 output = ops.apply_activation(output, activation=self.activation_final)
 
             return {"value": output}, attn_weights_list
+
+class SEBlock(nn.Module):
+    channels: int
+    reduction: int = 4
+
+    @nn.compact
+    def __call__(self, x):
+        # Global Average Pooling
+        gap = jnp.mean(x, axis=(1, 2), keepdims=True)
+        # Fully connected layers
+        squeeze = nn.Dense(self.channels // self.reduction)(gap)
+        squeeze = nn.relu(squeeze)
+        excite = nn.Dense(self.channels)(squeeze)
+        excite = nn.sigmoid(excite)
+        return x * excite
+
+class ResidualBlock(nn.Module):
+    channels: int
+
+    @nn.compact
+    def __call__(self, x):
+        residual = x
+        x = nn.Conv(self.channels, kernel_size=(3, 3), padding='SAME', use_bias=False)(x)
+        x = nn.BatchNorm(use_running_average=True)(x)
+        x = nn.relu(x)
+        x = nn.Conv(self.channels, kernel_size=(3, 3), padding='SAME', use_bias=False)(x)
+        x = nn.BatchNorm(use_running_average=True)(x)
+        x = SEBlock(self.channels)(x)
+        x += residual
+        return nn.relu(x)
+
+class StateEncoder(nn.Module):
+    embd_dim: int
+    num_blocks: int = 6
+    channels: int = 64
+
+    @nn.compact
+    def __call__(self, states):
+        B = states.shape[0]
+        T = states.shape[1]
+        H,W,C = 8,8,112
+        x = states.reshape(-1, H, W, C)  # (B*T, H, W, C)
+        x = nn.Conv(self.channels, kernel_size=(3, 3), padding='SAME', use_bias=False)(x)
+        x = nn.BatchNorm(use_running_average=True)(x)
+        x = nn.relu(x)
+
+        for _ in range(self.num_blocks):
+            x = ResidualBlock(self.channels)(x)
+
+        x = x.reshape(B, T, -1)  # Flatten spatial dims
+        embd_state = nn.Dense(self.embd_dim)(x)  # final embedding
+        return embd_state
+
+
+
